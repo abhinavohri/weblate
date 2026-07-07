@@ -1082,6 +1082,8 @@ class Component(  # ruff: ignore[too-many-public-methods]
     remote_revision = models.CharField(max_length=200, default="", blank=True)
     local_revision = models.CharField(max_length=200, default="", blank=True)
     processed_revision = models.CharField(max_length=200, default="", blank=True)
+    # Web URL of the most recent pull/merge request opened by Weblate when pushing
+    pull_request_url = models.URLField(default="", blank=True, editable=False)
 
     key_filter = RegexField(
         verbose_name=gettext_lazy("Key filter"),
@@ -2777,7 +2779,7 @@ class Component(  # ruff: ignore[too-many-public-methods]
         with self.repository.lock:
             self.log_info("pushing to remote repo")
             try:
-                self.repository.push(self.push_branch)
+                pull_request_url = self.repository.push(self.push_branch)
             except RepositoryError as error:
                 error_text = self.error_text(error)
                 report_error(
@@ -2824,6 +2826,13 @@ class Component(  # ruff: ignore[too-many-public-methods]
                 return False
             self.delete_alert("RepositoryChanges")
             self.delete_alert("PushFailure")
+            # Store the pull/merge request link so it can be surfaced in the
+            # repository maintenance UI
+            if pull_request_url and pull_request_url != self.pull_request_url:
+                self.pull_request_url = pull_request_url
+                Component.objects.filter(pk=self.pk).update(
+                    pull_request_url=pull_request_url
+                )
             return True
 
     @property

@@ -2782,6 +2782,46 @@ class VCSGitHubTest(VCSGitUpstreamTest):
         mock_push_to_fork.stop()
 
     @responses.activate
+    def test_push_returns_pull_request_url(self) -> None:
+        # Patch push_to_fork() function because we don't want to actually
+        # make a git push request
+        with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork") as mocked_push:
+            mocked_push.return_value = ""
+            html_url = "https://github.com/WeblateOrg/test/pull/1"
+            self.mock_responses(
+                pr_response={
+                    "url": "https://api.github.com/repos/WeblateOrg/test/pulls/1",
+                    "html_url": html_url,
+                }
+            )
+            with self.repo.lock:
+                self.assertEqual(self.repo.push(""), html_url)
+
+    @responses.activate
+    def test_push_returns_existing_pull_request_url(self) -> None:
+        # When a pull request already exists, GitHub rejects creating a new one
+        # without returning it, so it is looked up and its URL returned.
+        with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork") as mocked_push:
+            mocked_push.return_value = ""
+            html_url = "https://github.com/WeblateOrg/test/pull/7"
+            self.mock_responses(
+                pr_status=422,
+                pr_response={
+                    "message": "Validation Failed",
+                    "errors": [
+                        {"message": "A pull request already exists for test:branch."}
+                    ],
+                },
+            )
+            responses.add(
+                responses.GET,
+                "https://api.github.com/repos/WeblateOrg/test/pulls",
+                json=[{"html_url": html_url}],
+            )
+            with self.repo.lock:
+                self.assertEqual(self.repo.push(""), html_url)
+
+    @responses.activate
     def test_pull_request_error(self, branch: str = "") -> None:
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
@@ -2875,6 +2915,12 @@ class VCSGitHubTest(VCSGitUpstreamTest):
         self.mock_responses(
             pr_status=422,
             pr_response={"errors": [{"message": "A pull request already exists"}]},
+        )
+        # The existing pull request is looked up to expose its link
+        responses.add(
+            responses.GET,
+            "https://api.github.com/repos/WeblateOrg/test/pulls",
+            json=[{"html_url": "https://github.com/WeblateOrg/test/pull/1"}],
         )
 
         super().test_push(branch)

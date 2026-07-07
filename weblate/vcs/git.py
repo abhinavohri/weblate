@@ -1734,12 +1734,13 @@ class GitMergeRequestBase(GitForcePushRepository):
         except GitAPIRequestError as error:
             self.failed_fork_request(error, credentials)
 
-    def push(self, branch: str) -> None:
+    def push(self, branch: str) -> str | None:
         """
         Fork repository on GitHub and push changes.
 
         Pushes changes to *-weblate branch on fork and creates pull request against
-        original repository.
+        original repository. Returns the web URL of the created pull/merge request
+        when the backend exposes it.
         """
         current_branch = self.validate_branch_name(self.branch)
         self.validate_pull_url()
@@ -1755,7 +1756,9 @@ class GitMergeRequestBase(GitForcePushRepository):
             self.fork(credentials)
             fork_branch = self.get_fork_branch_name()
             self.push_to_fork(credentials, current_branch, fork_branch)
-        self.create_pull_request(credentials, current_branch, fork_remote, fork_branch)
+        return self.create_pull_request(
+            credentials, current_branch, fork_remote, fork_branch
+        )
 
     def authenticate_url(self, url: str, credentials: GitCredentials) -> str:
         """Inject credentials into URL."""
@@ -1821,7 +1824,13 @@ class GitMergeRequestBase(GitForcePushRepository):
         fork_remote: str,
         fork_branch: str,
         retry_fork: bool = True,
-    ) -> None:
+    ) -> str | None:
+        """
+        Create a pull/merge request for the pushed changes.
+
+        Returns the web URL of the created request when the backend exposes it in
+        the API response, otherwise ``None``.
+        """
         raise NotImplementedError
 
     def get_merge_message(self):
@@ -2482,11 +2491,12 @@ class GithubRepository(GitMergeRequestBase):
         fork_remote: str,
         fork_branch: str,
         retry_fork: bool = True,
-    ) -> None:
+    ) -> str | None:
         """
         Create pull request.
 
         Use to merge branch in forked repository into branch of remote repository.
+        Returns the web URL of the created pull request.
         """
         if fork_remote == "origin":
             head = fork_branch
@@ -2515,12 +2525,15 @@ class GithubRepository(GitMergeRequestBase):
         # compared to other errors, checking message seems to be the only option
         if "url" not in response_data:
             error_text = error_message or ""
-            # Gracefully handle pull request already exists or nothing to merge cases
-            if (
-                "A pull request already exists" in error_text
-                or "No commits between " in error_text
-            ):
-                return
+            # A pull request is already open for this branch. GitHub does not
+            # return it in the error response, so look it up to expose its link.
+            if "A pull request already exists" in error_text:
+                return self.get_existing_pull_request_url(
+                    credentials, fork_remote, fork_branch
+                )
+            # Nothing to merge, no pull request is involved
+            if "No commits between " in error_text:
+                return None
 
             if "Validation Failed" in error_text:
                 for error in response_data["errors"]:
@@ -2528,16 +2541,41 @@ class GithubRepository(GitMergeRequestBase):
                         # This most likely indicates that Weblate repository has moved
                         # and we should create a fresh fork.
                         self.create_fork(credentials)
-                        self.create_pull_request(
+                        return self.create_pull_request(
                             credentials,
                             origin_branch,
                             fork_remote,
                             fork_branch,
                             retry_fork=False,
                         )
-                        return
 
             self.failed_pull_request(error_message, pr_url, response, response_data)
+
+        # Expose the web URL of the freshly created pull request
+        return response_data.get("html_url")
+
+    def get_existing_pull_request_url(
+        self, credentials: GitCredentials, fork_remote: str, fork_branch: str
+    ) -> str | None:
+        """
+        Return the web URL of an already-open pull request for the pushed branch.
+
+        GitHub rejects creating a duplicate pull request without returning the
+        existing one, so query the open pull requests filtered by head branch.
+        """
+        head_owner = credentials["owner"] if fork_remote == "origin" else fork_remote
+        try:
+            response_data, response, error = self.request(
+                "get",
+                credentials,
+                f"{credentials['url']}/pulls",
+                params={"head": f"{head_owner}:{fork_branch}", "state": "open"},
+            )
+        except GitAPIRequestError:
+            return None
+        if isinstance(response_data, list) and response_data:
+            return response_data[0].get("html_url")
+        return None
 
 
 class GiteaRepository(GitMergeRequestBase):

@@ -955,7 +955,7 @@ class GithubAppRepository(GithubRepository):
             )
         return self.component.project.workspace
 
-    def push(self, branch: str) -> None:
+    def push(self, branch: str) -> str | None:
         # Translations must not push onto the pull branch — there's no fork
         # to absorb them. Substitute a dedicated weblate-* branch on the
         # source repo when no explicit push branch is configured (or when
